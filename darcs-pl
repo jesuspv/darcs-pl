@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+set -o errexit -o nounset -o pipefail
+
+darcs log --no-summary "$@" | awk '
+    function relative(epoch,    diff, n, u) {
+        diff = systime() - epoch
+        if      (diff < 60)       { n=diff;             u=(n==1?"second":"seconds") }
+        else if (diff < 3600)     { n=int(diff/60);     u=(n==1?"minute":"minutes") }
+        else if (diff < 86400)    { n=int(diff/3600);   u=(n==1?"hour":"hours")     }
+        else if (diff < 604800)   { n=int(diff/86400);  u=(n==1?"day":"days")       }
+        else if (diff < 2592000)  { n=int(diff/604800); u=(n==1?"week":"weeks")     }
+        else if (diff < 31536000) { n=int(diff/2592000);u=(n==1?"month":"months")   }
+        else                      { n=int(diff/31536000);u=(n==1?"year":"years")    }
+        return "(" n " " u " ago)"
+    }
+    /^patch /  { hash = substr($2, 1, 8) }
+    /^Author: / {
+        sub(/^Author: /, "")
+        match($0, /^[^<]+/)
+        author = substr($0, 1, RLENGTH)
+        gsub(/[ \t]+$/, "", author)
+    }
+    /^Date: / {
+        sub(/^Date:[ \t]+/, "")
+        split($0, p, " ")
+        split(p[4], t, ":")
+        split("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec", mn)
+        for (i=1; i<=12; i++) if (mn[i] == p[2]) { mon=i; break }
+        epoch = mktime(p[6] " " mon " " p[3] " " t[1] " " t[2] " " t[3])
+        date = relative(epoch)
+    }
+    /^  tagged / {
+        tagname = substr($0, 10)
+        pending = pending == "" ? tagname : pending ", " tagname
+    }
+    /^  \* / {
+        tag_str = ""
+        if (pending != "") {
+            tag_str = " \033[33m(tag: " pending ")\033[0m"
+            pending = ""
+        }
+        msg = substr($0, 5)
+        printf "* \033[31m%s\033[0m -%s %s \033[32m%s\033[0m \033[1;34m<%s>\033[0m\n", hash, tag_str, msg, date, author
+    }
+' | { [ -t 1 ] && less -R || cat; }
