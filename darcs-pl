@@ -2,6 +2,25 @@
 
 set -o errexit -o nounset -o pipefail
 
+# Parse flags before forwarding remaining args to darcs
+stat=0
+darcs_args=()
+for arg in "$@"; do
+    case "$arg" in
+        --stat|-s) stat=1 ;;
+        --help|-h)
+            echo "Usage: darcs-pl [-s] [darcs log options]"
+            echo ""
+            echo "Options:"
+            echo "  -h, --help    Show this help"
+            echo "  -s, --stat    Show files changed per patch"
+            echo ""
+            echo "Any other options are forwarded to darcs log."
+            exit 0 ;;
+        *) darcs_args+=("$arg") ;;
+    esac
+done
+
 # Try to detect unpushed patches; timeout avoids hanging on slow/unavailable remotes
 has_remote=0
 unpushed_hashes=""
@@ -10,7 +29,16 @@ if darcs_dry=$(timeout 10 darcs push --dry-run 2>/dev/null); then
     unpushed_hashes=$(printf '%s\n' "$darcs_dry" | awk '/^patch / { printf "%s,", substr($2, 1, 8) }')
 fi
 
-darcs log --no-summary "$@" | awk -v unpushed="$unpushed_hashes" -v has_remote="$has_remote" '
+if [[ $stat -eq 1 ]]; then
+    log_flag="--verbose"
+else
+    log_flag="--no-summary"
+fi
+
+darcs log "$log_flag" "${darcs_args[@]+"${darcs_args[@]}"}" | awk \
+    -v unpushed="$unpushed_hashes" \
+    -v has_remote="$has_remote" \
+    -v stat="$stat" '
     BEGIN {
         n = split(unpushed, arr, ",")
         for (i = 1; i <= n; i++)
@@ -28,7 +56,40 @@ darcs log --no-summary "$@" | awk -v unpushed="$unpushed_hashes" -v has_remote="
         else                      { n=int(diff/31536000);u=(n==1?"year":"years")    }
         return "(" n " " u " ago)"
     }
-    /^patch /  { hash = substr($2, 1, 8) }
+    function isort(arr, n,    i, j, tmp) {
+        for (i = 2; i <= n; i++) {
+            tmp = arr[i]; j = i - 1
+            while (j >= 1 && arr[j] > tmp) { arr[j+1] = arr[j]; j-- }
+            arr[j+1] = tmp
+        }
+    }
+    function flush(    i, f, keys, nkeys, op, rest, color) {
+        if (pending_line == "") return
+        print pending_line
+        if (stat) {
+            delete keys
+            nkeys = 0
+            for (f in pending_op) keys[++nkeys] = f
+            isort(keys, nkeys)
+            for (i = 1; i <= nkeys; i++) {
+                f  = keys[i]
+                op = substr(pending_op[f], 1, 1)
+                if (op == "_") continue
+                rest = (op == "R") ? f " -> " substr(pending_op[f], 3) : f
+                if      (op == "A") color = "\033[32m"
+                else if (op == "D") color = "\033[31m"
+                else if (op == "R") color = "\033[33m"
+                else                color = "\033[2m"
+                print "  " color op "\033[0m \033[2m" rest "\033[0m"
+            }
+        }
+        pending_line = ""
+        delete pending_op
+    }
+    /^patch / {
+        flush()
+        hash = substr($2, 1, 8)
+    }
     /^Author: / {
         sub(/^Author: /, "")
         match($0, /^[^<]+/)
@@ -61,6 +122,25 @@ darcs log --no-summary "$@" | awk -v unpushed="$unpushed_hashes" -v has_remote="
         tag_str = decorations != "" ? " \033[33m(" decorations ")\033[0m" : ""
 
         msg = substr($0, 5)
-        printf "* \033[31m%s\033[0m -%s %s \033[32m%s\033[0m \033[1;34m<%s>\033[0m\n", hash, tag_str, msg, date, author
+        pending_line = sprintf("* \033[31m%s\033[0m -%s %s \033[32m%s\033[0m \033[1;34m<%s>\033[0m", hash, tag_str, msg, date, author)
     }
+    stat && /^    hunk / {
+        f = $2; sub(/^\.\//, "", f)
+        if (!(f in pending_op)) pending_op[f] = "M"
+    }
+    stat && /^    addfile / {
+        f = $2; sub(/^\.\//, "", f)
+        if (!(f in pending_op)) pending_op[f] = "A"
+    }
+    stat && /^    rmfile / {
+        f = $2; sub(/^\.\//, "", f)
+        if (!(f in pending_op)) pending_op[f] = "D"
+    }
+    stat && /^    move / {
+        src = $2; sub(/^\.\//, "", src)
+        dst = $3; sub(/^\.\//, "", dst)
+        if (!(src in pending_op)) pending_op[src] = "R " dst
+        if (!(dst in pending_op)) pending_op[dst] = "_"
+    }
+    END { flush() }
 ' | { [ -t 1 ] && less -R || cat; }
