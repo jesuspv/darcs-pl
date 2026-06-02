@@ -130,11 +130,11 @@ darcs log "$log_flag" "${darcs_args[@]+"${darcs_args[@]}"}" | awk \
     }
     stat && /^    addfile / {
         f = $2; sub(/^\.\//, "", f)
-        if (!(f in pending_op)) pending_op[f] = "A"
+        pending_op[f] = "A"
     }
     stat && /^    rmfile / {
         f = $2; sub(/^\.\//, "", f)
-        if (!(f in pending_op)) pending_op[f] = "D"
+        pending_op[f] = "D"
     }
     stat && /^    move / {
         src = $2; sub(/^\.\//, "", src)
