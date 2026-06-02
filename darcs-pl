@@ -2,7 +2,21 @@
 
 set -o errexit -o nounset -o pipefail
 
-darcs log --no-summary "$@" | awk '
+# Try to detect unpushed patches; timeout avoids hanging on slow/unavailable remotes
+has_remote=0
+unpushed_hashes=""
+if darcs_dry=$(timeout 10 darcs push --dry-run 2>/dev/null); then
+    has_remote=1
+    unpushed_hashes=$(printf '%s\n' "$darcs_dry" | awk '/^patch / { printf "%s,", substr($2, 1, 8) }')
+fi
+
+darcs log --no-summary "$@" | awk -v unpushed="$unpushed_hashes" -v has_remote="$has_remote" '
+    BEGIN {
+        n = split(unpushed, arr, ",")
+        for (i = 1; i <= n; i++)
+            if (arr[i] != "") local_set[arr[i]] = 1
+        origin_marked = 0
+    }
     function relative(epoch,    diff, n, u) {
         diff = systime() - epoch
         if      (diff < 60)       { n=diff;             u=(n==1?"second":"seconds") }
@@ -35,11 +49,17 @@ darcs log --no-summary "$@" | awk '
         pending = pending == "" ? tagname : pending ", " tagname
     }
     /^  \* / {
-        tag_str = ""
+        decorations = ""
+        if (has_remote && !origin_marked && !(hash in local_set)) {
+            decorations = "defaultrepo"
+            origin_marked = 1
+        }
         if (pending != "") {
-            tag_str = " \033[33m(tag: " pending ")\033[0m"
+            decorations = decorations == "" ? "tag: " pending : decorations ", tag: " pending
             pending = ""
         }
+        tag_str = decorations != "" ? " \033[33m(" decorations ")\033[0m" : ""
+
         msg = substr($0, 5)
         printf "* \033[31m%s\033[0m -%s %s \033[32m%s\033[0m \033[1;34m<%s>\033[0m\n", hash, tag_str, msg, date, author
     }
